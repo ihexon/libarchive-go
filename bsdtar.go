@@ -212,8 +212,11 @@ func (t *BSDTar) readArchive(writer *C.struct_archive) error {
 
 		// Copy from reader to pipe in background
 		go func() {
-			defer pw.Close()
-			io.Copy(pw, t.reader)
+			defer func() {
+				_ = pw.Close()
+			}()
+
+			_, _ = io.Copy(pw, t.reader)
 		}()
 
 		r = C.archive_read_open_fd(a, C.int(pr.Fd()), C.size_t(t.bytesPerBlock))
@@ -226,13 +229,15 @@ func (t *BSDTar) readArchive(writer *C.struct_archive) error {
 
 	if r != C.ARCHIVE_OK {
 		if pipeReader != nil {
-			pipeReader.Close()
+			_ = pipeReader.Close()
 		}
 		return fmt.Errorf("error opening archive: %s", C.GoString(C.archive_error_string(a)))
 	}
 	defer C.archive_read_close(a)
 	if pipeReader != nil {
-		defer pipeReader.Close()
+		defer func() {
+			_ = pipeReader.Close()
+		}()
 	}
 
 	// Execute pending chdir before processing entries
@@ -243,7 +248,7 @@ func (t *BSDTar) readArchive(writer *C.struct_archive) error {
 	// Process entries
 	var entry *C.struct_archive_entry
 	for {
-		if t.fastRead && C.archive_match_path_unmatched_inclusions(t.matching) == 0 {
+		if t.fastRead && C.archive_match_path_unmatched_inclusions(t.matching) == 0 { // nolint:staticcheck
 			break
 		}
 

@@ -46,8 +46,8 @@ const defaultExtractFlags = ExtractTime | ExtractSecureSymlink | ExtractSecureNo
 // defaultBytesPerBlock is the read buffer size (256KB for better throughput)
 const defaultBytesPerBlock = 256 * 1024
 
-// BSDTar provides tar archive operations
-type BSDTar struct {
+// Archiver provides tar archive operations
+type Archiver struct {
 	mode         mode      // x, t
 	filename     string    // if filename is '-' or empty, read from stdin
 	reader       io.Reader // external data source (takes precedence over filename)
@@ -63,8 +63,8 @@ type BSDTar struct {
 	sparse        bool
 }
 
-func NewBSDTar() *BSDTar {
-	return &BSDTar{
+func NewArchiver() *Archiver {
+	return &Archiver{
 		safeWrite:     true,
 		format:        PAX,
 		bytesPerBlock: defaultBytesPerBlock,
@@ -74,43 +74,43 @@ func NewBSDTar() *BSDTar {
 }
 
 // WithArchiveFilePath sets the archive filename. Use "-" or empty for stdin.
-func (t *BSDTar) WithArchiveFilePath(filename string) *BSDTar {
+func (t *Archiver) WithArchiveFilePath(filename string) *Archiver {
 	t.filename = filename
 	return t
 }
 
 // SetReader sets an io.Reader as the archive data source.
 // When set, this takes precedence over filename.
-func (t *BSDTar) SetReader(r io.Reader) *BSDTar {
+func (t *Archiver) SetReader(r io.Reader) *Archiver {
 	t.reader = r
 	return t
 }
 
 // SetVerbose sets verbosity level
-func (t *BSDTar) SetVerbose(level int) *BSDTar {
+func (t *Archiver) SetVerbose(level int) *Archiver {
 	t.verbose = level
 	return t
 }
 
-func (t *BSDTar) SetSparse(sparse bool) *BSDTar {
+func (t *Archiver) SetSparse(sparse bool) *Archiver {
 	t.sparse = sparse
 	return t
 }
 
 // SetBytesPerBlock sets the read buffer size for archive operations
-func (t *BSDTar) SetBytesPerBlock(size int) *BSDTar {
+func (t *Archiver) SetBytesPerBlock(size int) *Archiver {
 	t.bytesPerBlock = size
 	return t
 }
 
 // WithPattern adds an inclusion pattern for extraction using libarchive's pattern matching
-func (t *BSDTar) WithPattern(pattern string) *BSDTar {
+func (t *Archiver) WithPattern(pattern string) *Archiver {
 	t.patterns = append(t.patterns, pattern)
 	return t
 }
 
 // initMatching initializes the libarchive matching object with stored patterns
-func (t *BSDTar) initMatching() error {
+func (t *Archiver) initMatching() error {
 	t.matching = C.archive_match_new()
 	if t.matching == nil {
 		return errors.New("cannot allocate match object")
@@ -129,25 +129,25 @@ func (t *BSDTar) initMatching() error {
 }
 
 // freeMatching releases the libarchive matching object
-func (t *BSDTar) freeMatching() {
+func (t *Archiver) freeMatching() {
 	if t.matching != nil {
 		C.archive_match_free(t.matching)
 		t.matching = nil
 	}
 }
 
-func (t *BSDTar) SetFastRead(fastRead bool) *BSDTar {
+func (t *Archiver) SetFastRead(fastRead bool) *Archiver {
 	t.fastRead = fastRead
 	return t
 }
 
-func (t *BSDTar) SetChdir(dir string) *BSDTar {
+func (t *Archiver) SetChdir(dir string) *Archiver {
 	t.pendingChdir = dir
 	return t
 }
 
 // doChdir executes any pending chdir request
-func (t *BSDTar) doChdir() error {
+func (t *Archiver) doChdir() error {
 	if t.pendingChdir == "" {
 		return nil
 	}
@@ -160,7 +160,17 @@ func (t *BSDTar) doChdir() error {
 }
 
 // ModeX extracts files from an archive (equivalent to tar -x)
-func (t *BSDTar) ModeX() error {
+func (t *Archiver) ModeX() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("could not get current working directory: %w", err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			logrus.Errorf("could not restore original working directory: %v", err)
+		}
+	}()
+
 	extractFlags := defaultExtractFlags
 
 	if t.sparse {
@@ -186,7 +196,7 @@ func (t *BSDTar) ModeX() error {
 	return t.readArchive(writer)
 }
 
-func (t *BSDTar) readArchive(writer *C.struct_archive) error {
+func (t *Archiver) readArchive(writer *C.struct_archive) error {
 	// Create archive reader
 	a := C.archive_read_new()
 	if a == nil {

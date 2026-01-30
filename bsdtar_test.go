@@ -7,7 +7,7 @@ import (
 
 func TestModX(t *testing.T) {
 	ShowVersion()
-	if err := NewBSDTar().WithArchiveFilePath("raw-storages.tar").SetVerbose(1).
+	if err := NewArchiver().WithArchiveFilePath("raw-storages.tar").SetVerbose(1).
 		SetSparse(true).
 		SetFastRead(true).
 		WithPattern("container-storage.raw").

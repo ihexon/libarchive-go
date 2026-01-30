@@ -13,8 +13,6 @@ import (
 	"io"
 	"os"
 	"unsafe"
-
-	"github.com/sirupsen/logrus"
 )
 
 type mode int
@@ -167,7 +165,7 @@ func (t *Archiver) ModeX() error {
 	}
 	defer func() {
 		if err := os.Chdir(cwd); err != nil {
-			logrus.Errorf("could not restore original working directory: %v", err)
+			_, _ = fmt.Fprintf(os.Stderr, "failed to restore original working directory: %v\n", err)
 		}
 	}()
 
@@ -267,12 +265,12 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 			break
 		}
 		if r == C.ARCHIVE_FATAL {
-			logrus.Errorf("%v", C.GoString(C.archive_error_string(a)))
+			_, _ = fmt.Fprintf(os.Stderr, "error reading archive: %v\n", C.GoString(C.archive_error_string(a)))
 			break
 		}
 
 		if r < C.ARCHIVE_OK {
-			logrus.Warnf("%v", C.GoString(C.archive_error_string(a)))
+			_, _ = fmt.Fprintf(os.Stderr, "warning: %v\n", C.GoString(C.archive_error_string(a)))
 		}
 
 		if r == C.ARCHIVE_RETRY {
@@ -281,7 +279,7 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 
 		pathname := C.GoString(C.archive_entry_pathname(entry))
 		if pathname == "" {
-			logrus.Warnf("archive entry has empty or unreadable filename, skipping")
+			_, _ = fmt.Fprintf(os.Stderr, "warning: archive entry has empty or unreadable filename, skipping\n")
 			continue
 		}
 
@@ -293,7 +291,7 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 
 		// Verbose output
 		if t.verbose > 0 {
-			logrus.Infof("x %v", pathname)
+			_, _ = fmt.Fprintf(os.Stderr, "x %v\n", pathname)
 		}
 
 		// Extract entry
@@ -303,7 +301,7 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 			if r == C.ARCHIVE_FATAL {
 				return fmt.Errorf("extract %v: %v", pathname, errStr)
 			}
-			logrus.Warnf("%v: %v", pathname, errStr)
+			_, _ = fmt.Fprintf(os.Stderr, "%v: %v\n", pathname, errStr)
 		}
 	}
 
@@ -312,5 +310,5 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 
 func ShowVersion() {
 	cVersion := C.archive_version_details()
-	logrus.Infof("%v", C.GoString(cVersion))
+	_, _ = fmt.Fprintf(os.Stderr, "%v\n", C.GoString(cVersion))
 }

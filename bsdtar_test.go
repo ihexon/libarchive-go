@@ -2,6 +2,7 @@ package libarchive_go
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"os"
 	"testing"
@@ -17,7 +18,7 @@ func TestModX(t *testing.T) {
 		SetFastRead(true).
 		WithPattern("container-storage.raw").
 		WithPattern("userdata-storage.raw").
-		ModeX(); err != nil {
+		ModeX(context.Background()); err != nil {
 		t.Errorf("ModeX failed: %v", err)
 	}
 	_ = os.Remove("userdata-storage.raw")
@@ -28,7 +29,7 @@ func TestModX(t *testing.T) {
 		SetFastRead(true).
 		WithPattern("container-storage.raw").
 		WithPattern("userdata-storage.raw").
-		ModeX(); err != nil {
+		ModeX(context.Background()); err != nil {
 		t.Errorf("ModeX failed: %v", err)
 	}
 

@@ -32,6 +32,11 @@ type extractFlags int
 
 const (
 	ExtractTime             extractFlags = C.ARCHIVE_EXTRACT_TIME
+	ExtractPerm             extractFlags = C.ARCHIVE_EXTRACT_PERM
+	ExtractOwner            extractFlags = C.ARCHIVE_EXTRACT_OWNER
+	ExtractACL              extractFlags = C.ARCHIVE_EXTRACT_ACL
+	ExtractXattr            extractFlags = C.ARCHIVE_EXTRACT_XATTR
+	ExtractFFlags           extractFlags = C.ARCHIVE_EXTRACT_FFLAGS
 	ExtractSecureSymlink    extractFlags = C.ARCHIVE_EXTRACT_SECURE_SYMLINKS
 	ExtractSecureNoDot      extractFlags = C.ARCHIVE_EXTRACT_SECURE_NODOTDOT
 	ExtractSecureNoAbsolute extractFlags = C.ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS
@@ -39,7 +44,7 @@ const (
 	ExtractSparse           extractFlags = C.ARCHIVE_EXTRACT_SPARSE
 )
 
-// defaultExtractFlags provides sensible defaults for extraction
+// defaultExtractFlags: time + security checks (same as bsdtar for non-root)
 const defaultExtractFlags = ExtractTime | ExtractSecureSymlink | ExtractSecureNoDot | ExtractSecureNoAbsolute | ExtractUnlink
 
 // defaultBytesPerBlock is the read buffer size (256KB for better throughput)
@@ -172,6 +177,11 @@ func (t *Archiver) ModeX(ctx context.Context) error {
 
 	extractFlags := defaultExtractFlags
 
+	// Root user: preserve permissions, owner, ACL, xattr, fflags (same as bsdtar -p)
+	if os.Geteuid() == 0 {
+		extractFlags |= ExtractPerm | ExtractOwner | ExtractACL | ExtractXattr | ExtractFFlags
+	}
+
 	if t.sparse {
 		extractFlags |= ExtractSparse
 	}
@@ -255,7 +265,7 @@ func (t *Archiver) readArchive(ctx context.Context, writer *C.struct_archive) er
 			}()
 			src = f
 		}
-		_, copyErr = io.Copy(pw, src)
+		_, copyErr = io.Copy(pw, src) // block until copy is complete or ctx is canceled
 	}()
 
 	r := C.archive_read_open_fd(a, C.int(pr.Fd()), C.size_t(t.bytesPerBlock))
@@ -283,7 +293,7 @@ func (t *Archiver) readArchive(ctx context.Context, writer *C.struct_archive) er
 		default:
 		}
 
-		if t.fastRead && C.archive_match_path_unmatched_inclusions(t.matching) == 0 { // nolint:staticcheck
+		if t.fastRead && C.archive_match_path_unmatched_inclusions(t.matching) == 0 {
 			break
 		}
 
@@ -291,12 +301,12 @@ func (t *Archiver) readArchive(ctx context.Context, writer *C.struct_archive) er
 		if r == C.ARCHIVE_EOF {
 			break
 		}
+
 		if r == C.ARCHIVE_FATAL {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			_, _ = fmt.Fprintf(os.Stderr, "error reading archive: %v\n", C.GoString(C.archive_error_string(a)))
-			break
+			return fmt.Errorf("%v", C.GoString(C.archive_error_string(a)))
 		}
 
 		if r < C.ARCHIVE_OK {
@@ -327,14 +337,13 @@ func (t *Archiver) readArchive(ctx context.Context, writer *C.struct_archive) er
 		// Extract entry
 		r = C.archive_read_extract2(a, entry, writer)
 		if r != C.ARCHIVE_OK {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
 			errStr := C.GoString(C.archive_error_string(a))
 			if r == C.ARCHIVE_FATAL {
-				return fmt.Errorf("extract %v: %v", pathname, errStr)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 			}
-			_, _ = fmt.Fprintf(os.Stderr, "%v: %v\n", pathname, errStr)
+			return fmt.Errorf("extract %v: %v", pathname, errStr)
 		}
 	}
 

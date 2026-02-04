@@ -8,6 +8,7 @@ package libarchive_go
 */
 import "C"
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -158,7 +159,7 @@ func (t *Archiver) doChdir() error {
 }
 
 // ModeX extracts files from an archive (equivalent to tar -x)
-func (t *Archiver) ModeX() error {
+func (t *Archiver) ModeX(ctx context.Context) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("could not get current working directory: %w", err)
@@ -191,10 +192,10 @@ func (t *Archiver) ModeX() error {
 	C.archive_write_disk_set_standard_lookup(writer)
 	C.archive_write_disk_set_options(writer, C.int(extractFlags))
 
-	return t.readArchive(writer)
+	return t.readArchive(ctx, writer)
 }
 
-func (t *Archiver) readArchive(writer *C.struct_archive) error {
+func (t *Archiver) readArchive(ctx context.Context, writer *C.struct_archive) error {
 	// Create archive reader
 	a := C.archive_read_new()
 	if a == nil {
@@ -206,47 +207,67 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 	C.archive_read_support_filter_all(a)
 	C.archive_read_support_format_all(a)
 
-	// Open the archive
-	var r C.int
-	var pipeReader *os.File
-
-	if t.reader != nil {
-		// Create pipe for streaming from io.Reader
-		pr, pw, err := os.Pipe()
-		if err != nil {
-			return fmt.Errorf("failed to create pipe: %w", err)
-		}
-		pipeReader = pr
-
-		// Copy from reader to pipe in background
-		go func() {
-			defer func() {
-				_ = pw.Close()
-			}()
-
-			_, _ = io.Copy(pw, t.reader)
-		}()
-
-		r = C.archive_read_open_fd(a, C.int(pr.Fd()), C.size_t(t.bytesPerBlock))
-	} else {
-		// Read from file (use "-" for stdin)
-		cFilename := C.CString(t.filename)
-		defer C.free(unsafe.Pointer(cFilename))
-		r = C.archive_read_open_filename(a, cFilename, C.size_t(t.bytesPerBlock))
+	// Both file and reader paths use a pipe so that ctx cancellation
+	// can close the write end and interrupt blocking C read calls.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("failed to create pipe: %w", err)
 	}
 
-	if r != C.ARCHIVE_OK {
-		if pipeReader != nil {
-			_ = pipeReader.Close()
+	// sourceErrCh receives the error from the source goroutine (nil on success).
+	// Buffered so the goroutine never blocks on send.
+	sourceErrCh := make(chan error, 1)
+
+	go func() {
+		var copyErr error
+		defer func() {
+			_ = pw.Close()
+			sourceErrCh <- copyErr
+		}()
+
+		// Monitor ctx in a separate goroutine; closing pw interrupts
+		// any blocking read() in libarchive.
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = pw.Close() // safe: duplicate close is no-op after first
+			case <-done:
+			}
+		}()
+
+		var src io.Reader
+		if t.reader != nil {
+			src = t.reader
+		} else if t.filename == "" || t.filename == "-" {
+			src = os.Stdin
+		} else {
+			f, err := os.Open(t.filename)
+			if err != nil {
+				copyErr = err
+				return
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "failed to close file: %v\n", err)
+				}
+			}()
+			src = f
 		}
-		return fmt.Errorf("error opening archive: %s", C.GoString(C.archive_error_string(a)))
+		_, copyErr = io.Copy(pw, src)
+	}()
+
+	r := C.archive_read_open_fd(a, C.int(pr.Fd()), C.size_t(t.bytesPerBlock))
+	if r != C.ARCHIVE_OK {
+		_ = pr.Close()
+		if srcErr := <-sourceErrCh; srcErr != nil {
+			return fmt.Errorf("error opening archive: %w", srcErr)
+		}
+		return fmt.Errorf("error opening archive: %v", C.GoString(C.archive_error_string(a)))
 	}
 	defer C.archive_read_close(a)
-	if pipeReader != nil {
-		defer func() {
-			_ = pipeReader.Close()
-		}()
-	}
+	defer func() { _ = pr.Close() }()
 
 	// Execute pending chdir before processing entries
 	if err := t.doChdir(); err != nil {
@@ -256,6 +277,12 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 	// Process entries
 	var entry *C.struct_archive_entry
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if t.fastRead && C.archive_match_path_unmatched_inclusions(t.matching) == 0 { // nolint:staticcheck
 			break
 		}
@@ -265,6 +292,9 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 			break
 		}
 		if r == C.ARCHIVE_FATAL {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			_, _ = fmt.Fprintf(os.Stderr, "error reading archive: %v\n", C.GoString(C.archive_error_string(a)))
 			break
 		}
@@ -297,12 +327,19 @@ func (t *Archiver) readArchive(writer *C.struct_archive) error {
 		// Extract entry
 		r = C.archive_read_extract2(a, entry, writer)
 		if r != C.ARCHIVE_OK {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			errStr := C.GoString(C.archive_error_string(a))
 			if r == C.ARCHIVE_FATAL {
 				return fmt.Errorf("extract %v: %v", pathname, errStr)
 			}
 			_, _ = fmt.Fprintf(os.Stderr, "%v: %v\n", pathname, errStr)
 		}
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
 	return nil

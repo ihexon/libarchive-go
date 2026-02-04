@@ -248,7 +248,11 @@ func (t *Archiver) readArchive(ctx context.Context, writer *C.struct_archive) er
 				copyErr = err
 				return
 			}
-			defer f.Close()
+			defer func() {
+				if err := f.Close(); err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "failed to close file: %v\n", err)
+				}
+			}()
 			src = f
 		}
 		_, copyErr = io.Copy(pw, src)
